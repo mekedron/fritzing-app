@@ -1,3 +1,36 @@
+<div align="center">
+
+# 🍎 Fritzing for macOS · Free Automatic Builds
+
+**Ready-to-run macOS builds of [Fritzing](https://fritzing.org), rebuilt automatically from source every week.**
+*No paywall. No PayPal. Just download and run.*
+
+<br>
+
+[![Download the latest macOS build](https://img.shields.io/github/v/release/mekedron/fritzing-app?label=Download%20macOS%20build&style=for-the-badge&color=2ea44f&logo=apple&logoColor=white)](https://github.com/mekedron/fritzing-app/releases/latest)
+
+[![Weekly build](https://github.com/mekedron/fritzing-app/actions/workflows/build.yml/badge.svg)](https://github.com/mekedron/fritzing-app/actions/workflows/build.yml)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey?logo=apple&logoColor=white)
+
+</div>
+
+Every [release](https://github.com/mekedron/fritzing-app/releases) is a **self-contained `Fritzing.app`** — Qt and all native dependencies bundled, nothing else to install. A [GitHub Action](.github/workflows/build.yml) checks the upstream project every week and, whenever there are new commits, compiles a fresh build on a macOS runner and publishes it here — fully automatically.
+
+## Why this fork exists
+
+Fritzing is free and open-source software (**GPLv3**), but the official project asks for a small payment to download the **prebuilt** binaries — an entirely fair way to fund development. The problem, for me, was the checkout: the only option is **PayPal**, and I simply couldn't use it —
+
+- it refused to let me sign in without verifying an **old phone number** I no longer have access to, and
+- its only suggested remedy was to *"contact support"* … which itself required signing in first. A perfect dead end. 🔁
+
+So I couldn't pay for or download the app at all — through no fault of Fritzing's. But because the source is **GPLv3**, anyone is free to build it themselves. This fork just does exactly that, on autopilot, so any macOS user who hits the same wall can still get a working, up-to-date Fritzing.
+
+> [!TIP]
+> If PayPal works for you and you can spare it, please [**support the Fritzing project**](https://fritzing.org/) directly. This fork only exists to route around a broken checkout — not to take anything away from the people who build Fritzing. 💚
+
+---
+
 # Fritzing
 
 |Branch|Badge|
