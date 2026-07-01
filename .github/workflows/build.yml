@@ -204,6 +204,11 @@ jobs:
           set -euxo pipefail
           APP="$GITHUB_WORKSPACE/release64/Fritzing.app"
           macdeployqt "$APP" -verbose=1
+          # macdeployqt rewrites the Mach-O load commands and leaves the bundle
+          # signature broken, which macOS reports as "damaged". Re-sign ad-hoc so
+          # the app shows the normal "unidentified developer" prompt instead.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP" && echo "::notice::ad-hoc signature valid"
           ZIP="$GITHUB_WORKSPACE/Fritzing-${SHORT}-macOS-arm64.zip"
           ( cd "$GITHUB_WORKSPACE/release64" && ditto -c -k --sequesterRsrc --keepParent Fritzing.app "$ZIP" )
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"

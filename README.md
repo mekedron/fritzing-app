@@ -17,6 +17,13 @@
 
 Every [release](https://github.com/mekedron/fritzing-app/releases) is a **self-contained `Fritzing.app`** — Qt and all native dependencies bundled, nothing else to install. A [GitHub Action](.github/workflows/build.yml) checks the upstream project every week and, whenever there are new commits, compiles a fresh build on a macOS runner and publishes it here — fully automatically.
 
+> [!IMPORTANT]
+> **First launch on macOS.** These builds are signed *ad-hoc* (not with a paid Apple Developer ID), so macOS flags the app as coming from an "unidentified developer." To open it, either **right-click (or Control-click) the app → Open → Open**, or run this once in Terminal:
+> ```sh
+> xattr -cr /path/to/Fritzing.app
+> ```
+> After that it launches normally.
+
 ## Why this fork exists
 
 Fritzing is free and open-source software (**GPLv3**), but the official project asks for a small payment to download the **prebuilt** binaries — an entirely fair way to fund development. The problem, for me, was the checkout: the only option is **PayPal**, and I simply couldn't use it —
