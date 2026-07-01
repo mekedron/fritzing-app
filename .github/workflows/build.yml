@@ -1,0 +1,230 @@
+name: Build Fritzing (macOS · weekly)
+
+# Weekly macOS build of upstream Fritzing.
+# Checks fritzing/fritzing-app@develop for new commits and, if there are any
+# that haven't been built yet, compiles the app from source on macOS (arm64) —
+# installing Qt 6.5.3 and building the pinned native dependencies
+# (boost, libgit2, QuaZip, Clipper1, ngspice headers, svgpp), applying the
+# macOS-SDK AGL fixup, then macdeployqt-ing the result and publishing it.
+#
+# This file is the only addition on top of the upstream source.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"          # every Monday at 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if the current upstream commit was already built"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-fritzing
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: fritzing/fritzing-app
+  UPSTREAM_BRANCH: develop
+  QT_VERSION: "6.5.3"
+
+jobs:
+  # ── Check upstream for new commits ───────────────────────────────────────────
+  check:
+    name: Check upstream for new commits
+    runs-on: ubuntu-latest
+    outputs:
+      sha:   ${{ steps.up.outputs.sha }}
+      short: ${{ steps.up.outputs.short }}
+      tag:   ${{ steps.up.outputs.tag }}
+      build: ${{ steps.up.outputs.build }}
+    steps:
+      - name: Resolve upstream HEAD and decide whether to build
+        id: up
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA=$(git ls-remote "https://github.com/${UPSTREAM_REPO}.git" "refs/heads/${UPSTREAM_BRANCH}" | cut -f1)
+          [ -n "$SHA" ] || { echo "::error::Could not read upstream HEAD"; exit 1; }
+          SHORT=${SHA:0:7}
+          TAG="build-${SHORT}"
+          {
+            echo "sha=$SHA"
+            echo "short=$SHORT"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+          if [ "${{ inputs.force }}" != "true" ] && gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TAG already built — no new commits since last build. Skipping."
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Building upstream ${UPSTREAM_BRANCH} @ ${SHORT}"
+          fi
+
+  # ── Build on macOS (arm64) ───────────────────────────────────────────────────
+  build:
+    name: Build (macOS arm64)
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      SHA:   ${{ needs.check.outputs.sha }}
+      SHORT: ${{ needs.check.outputs.short }}
+      TAG:   ${{ needs.check.outputs.tag }}
+    steps:
+      - name: Checkout upstream Fritzing @ ${{ needs.check.outputs.short }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.check.outputs.sha }}
+          path: fritzing-app
+
+      - name: Install Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: mac
+          target: desktop
+          arch: clang_64
+          modules: qtserialport qt5compat
+          cache: true
+
+      - name: Restore native dependency cache
+        id: depcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            boost_1_85_0
+            libgit2-1.7.1
+            Clipper1
+            ngspice-42
+            svgpp-1.3.1
+            quazip-6.5.3-1.4intuisphere
+          key: fzdeps-v1-${{ runner.os }}-${{ runner.arch }}-qt${{ env.QT_VERSION }}
+
+      # Native deps are built as siblings of fritzing-app/, exactly like a local
+      # checkout, because the pri/*detect.pri files hardcode those relative paths.
+      - name: Build native dependencies
+        if: steps.depcache.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          QT_PREFIX="$(qmake -query QT_INSTALL_PREFIX)"
+          JOBS="$(sysctl -n hw.ncpu)"
+          cd "$ROOT"
+
+          # boost 1.85 — headers only (Fritzing/svgpp use them header-only)
+          curl -fL --retry 5 --retry-all-errors -o boost.tar.bz2 \
+            https://archives.boost.io/release/1.85.0/source/boost_1_85_0.tar.bz2
+          tar xjf boost.tar.bz2 boost_1_85_0/boost
+          rm -f boost.tar.bz2
+
+          # libgit2 1.7.1 — static; macOS links it with -framework Security
+          curl -fL --retry 5 --retry-all-errors -o libgit2.tgz \
+            https://github.com/libgit2/libgit2/archive/refs/tags/v1.7.1.tar.gz
+          tar xzf libgit2.tgz && rm -f libgit2.tgz
+          cmake -S libgit2-1.7.1 -B libgit2-1.7.1/_b -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTS=OFF -DBUILD_CLI=OFF -DUSE_SSH=OFF \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_INSTALL_PREFIX="$ROOT/libgit2-1.7.1"
+          cmake --build libgit2-1.7.1/_b -j"$JOBS"
+          cmake --install libgit2-1.7.1/_b
+
+          # Clipper1 6.4.2 (polyclipping) from SourceForge, retry until a valid zip
+          for i in 1 2 3 4 5; do
+            curl -fL -o clipper.zip "https://sourceforge.net/projects/polyclipping/files/clipper_ver6.4.2.zip/download" || true
+            unzip -tq clipper.zip >/dev/null 2>&1 && break
+            echo "clipper download attempt $i was not a valid zip, retrying"; sleep 5
+          done
+          mkdir clipper-src && (cd clipper-src && unzip -q ../clipper.zip)
+          cmake -S clipper-src/cpp -B clipper-src/cpp/_b -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_INSTALL_PREFIX="$ROOT/Clipper1/6.4.2"
+          cmake --build clipper-src/cpp/_b -j"$JOBS"
+          cmake --install clipper-src/cpp/_b
+          rm -rf clipper-src clipper.zip
+
+          # ngspice 42 — headers only; SourceForge file downloads are blocked for
+          # curl (JS interstitial), so fetch the tag via SF git and copy headers.
+          git clone --depth 1 --branch ngspice-42 https://git.code.sf.net/p/ngspice/ngspice ngspice-git
+          mkdir -p ngspice-42 && cp -R ngspice-git/src/include ngspice-42/include
+          rm -rf ngspice-git
+
+          # svgpp 1.3.1 — headers only
+          git clone --depth 1 --branch v1.3.1 https://github.com/svgpp/svgpp.git svgpp-1.3.1
+
+          # QuaZip 1.4 built against this exact Qt. Dir name must carry the
+          # "intuisphere" suffix that pri/quazipdetect.pri hardcodes.
+          git clone --depth 1 --branch v1.4 https://github.com/stachenov/quazip.git quazip-src
+          cmake -S quazip-src -B quazip-src/_b -DCMAKE_PREFIX_PATH="$QT_PREFIX" \
+            -DQUAZIP_QT_MAJOR_VERSION=6 -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DBUILD_SHARED_LIBS=ON -DQUAZIP_ENABLE_TESTS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$ROOT/quazip-${QT_VERSION}-1.4intuisphere"
+          cmake --build quazip-src/_b -j"$JOBS"
+          cmake --install quazip-src/_b
+          rm -rf quazip-src
+
+      # Qt 6.5.x still references Apple's removed AGL framework; strip it so the
+      # link doesn't fail on newer SDKs. Harmless where AGL still exists.
+      - name: Patch Qt — strip removed AGL framework
+        run: |
+          set -euxo pipefail
+          QT_LIBS="$(qmake -query QT_INSTALL_LIBS)"
+          QT_DATA="$(qmake -query QT_HOST_DATA)"
+          for f in "$QT_DATA/mkspecs/common/mac.conf" "$QT_DATA/mkspecs/modules/qt_lib_gui_private.pri"; do
+            [ -f "$f" ] && sed -i '' -e 's/ -framework AGL//g' -e 's/-framework AGL //g' "$f" || true
+          done
+          find "$QT_LIBS" -name '*.prl' -print0 | while IFS= read -r -d '' f; do
+            if grep -q 'AGL' "$f"; then
+              sed -i '' -e 's/ -framework AGL//g' -e 's/-framework AGL //g' \
+                        -e 's/;-framework AGL//g' -e 's/-framework AGL;//g' "$f"
+            fi
+          done
+
+      - name: qmake + build
+        working-directory: fritzing-app
+        run: |
+          set -euxo pipefail
+          rm -f .qmake.stash .qmake.cache
+          qmake -o Makefile phoenix.pro \
+            boost_root="$GITHUB_WORKSPACE/boost_1_85_0" \
+            QMAKE_APPLE_DEVICE_ARCHS=arm64
+          make -f Makefile.Release -j"$(sysctl -n hw.ncpu)"
+          BIN=../release64/Fritzing.app/Contents/MacOS/Fritzing
+          test -x "$BIN"
+          echo "::notice::Build succeeded: $(file -b "$BIN")"
+
+      - name: Bundle Qt frameworks (macdeployqt) and zip the app
+        id: pkg
+        run: |
+          set -euxo pipefail
+          APP="$GITHUB_WORKSPACE/release64/Fritzing.app"
+          macdeployqt "$APP" -verbose=1
+          ZIP="$GITHUB_WORKSPACE/Fritzing-${SHORT}-macOS-arm64.zip"
+          ( cd "$GITHUB_WORKSPACE/release64" && ditto -c -k --sequesterRsrc --keepParent Fritzing.app "$ZIP" )
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          ls -la "$ZIP"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fritzing-${{ needs.check.outputs.short }}-macOS-arm64
+          path: ${{ steps.pkg.outputs.zip }}
+          retention-days: 30
+
+      - name: Publish release ${{ needs.check.outputs.tag }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "Fritzing macOS build ($SHORT)" \
+              --notes "Automated macOS (arm64) build of [\`${UPSTREAM_REPO}@${SHORT}\`](https://github.com/${UPSTREAM_REPO}/commit/${SHA}), built with Qt ${QT_VERSION}."
+          fi
+          gh release upload "$TAG" "${{ steps.pkg.outputs.zip }}" --repo "$GITHUB_REPOSITORY" --clobber
+          echo "::notice::Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
