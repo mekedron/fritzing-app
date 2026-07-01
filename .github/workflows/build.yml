@@ -189,6 +189,11 @@ jobs:
         working-directory: fritzing-app
         run: |
           set -euxo pipefail
+          # The headless -db build (parts step) must not block on modal warning
+          # dialogs (e.g. a part parse warning), so make runDatabaseService set
+          # FMessageBox::BlockMessages — exactly what the in-app DB regen does.
+          perl -0777 -i -pe 's/(void FApplication::runDatabaseService\(\)\s*\{\s*createUserDataStoreFolderStructures\(\);)/$1\n\tFMessageBox::BlockMessages = true;/' src/fapplication.cpp
+          grep -A4 'void FApplication::runDatabaseService' src/fapplication.cpp | grep -q 'BlockMessages = true' || { echo "::error::BlockMessages patch did not apply"; exit 1; }
           rm -f .qmake.stash .qmake.cache
           qmake -o Makefile phoenix.pro \
             boost_root="$GITHUB_WORKSPACE/boost_1_85_0" \
@@ -199,6 +204,7 @@ jobs:
           echo "::notice::Build succeeded: $(file -b "$BIN")"
 
       - name: Bundle parts library + data and build parts.db
+        timeout-minutes: 15
         run: |
           set -euxo pipefail
           APP="$GITHUB_WORKSPACE/release64/Fritzing.app"
@@ -211,7 +217,7 @@ jobs:
           git clone --depth 1 --branch master https://github.com/fritzing/fritzing-parts.git "$MACOS/fritzing-parts"
           # Build parts.db BEFORE macdeployqt so the app resolves Qt (including
           # QtCore5Compat) via the Qt-install rpath rather than the not-yet-complete bundle.
-          ( cd "$MACOS" && ./Fritzing -f "$MACOS" -pp "$MACOS/fritzing-parts" -db "$MACOS/fritzing-parts/parts.db" )
+          ( cd "$MACOS" && QT_QPA_PLATFORM=offscreen ./Fritzing -f "$MACOS" -pp "$MACOS/fritzing-parts" -db "$MACOS/fritzing-parts/parts.db" )
           test -s "$MACOS/fritzing-parts/parts.db" || { echo "::error::parts.db was not built"; exit 1; }
           # Drop .git: once parts.db exists the launch path skips getSha, and .git
           # breaks codesign ("a sealed resource is missing or invalid").
