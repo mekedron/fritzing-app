@@ -204,11 +204,32 @@ jobs:
           set -euxo pipefail
           APP="$GITHUB_WORKSPACE/release64/Fritzing.app"
           macdeployqt "$APP" -verbose=1
-          # macdeployqt rewrites the Mach-O load commands and leaves the bundle
-          # signature broken, which macOS reports as "damaged". Re-sign ad-hoc so
-          # the app shows the normal "unidentified developer" prompt instead.
+
+          # macdeployqt follows the main binary's Qt frameworks but NOT libquazip's
+          # dependency on QtCore5Compat (QuaZip uses QTextCodec), so add it by hand.
+          QT_LIBS="$(qmake -query QT_INSTALL_LIBS)"
+          if [ ! -d "$APP/Contents/Frameworks/QtCore5Compat.framework" ]; then
+            ditto "$QT_LIBS/QtCore5Compat.framework" "$APP/Contents/Frameworks/QtCore5Compat.framework"
+            rm -rf "$APP/Contents/Frameworks/QtCore5Compat.framework/Headers" \
+                   "$APP/Contents/Frameworks/QtCore5Compat.framework/Versions/A/Headers"
+          fi
+
+          # Fail the build if ANY @rpath dependency is still unbundled, so a missing
+          # framework is caught here instead of crashing the app at launch.
+          FW="$APP/Contents/Frameworks"
+          MISSING=""
+          while IFS= read -r f; do
+            file "$f" 2>/dev/null | grep -q Mach-O || continue
+            while IFS= read -r d; do
+              [ -e "$FW/${d#@rpath/}" ] || MISSING="$MISSING $d"
+            done < <(otool -L "$f" 2>/dev/null | grep -oE '@rpath/[^ ]+' || true)
+          done < <(find "$APP" -type f)
+          if [ -n "$MISSING" ]; then echo "::error::unbundled @rpath deps:$MISSING"; exit 1; fi
+
+          # macdeployqt rewrites Mach-O load commands and leaves the bundle signature
+          # broken (macOS reports "damaged"), so re-sign ad-hoc after all edits.
           codesign --force --deep --sign - "$APP"
-          codesign --verify --deep --strict "$APP" && echo "::notice::ad-hoc signature valid"
+          codesign --verify --deep --strict "$APP" && echo "::notice::signature valid, all deps bundled"
           ZIP="$GITHUB_WORKSPACE/Fritzing-${SHORT}-macOS-arm64.zip"
           ( cd "$GITHUB_WORKSPACE/release64" && ditto -c -k --sequesterRsrc --keepParent Fritzing.app "$ZIP" )
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
